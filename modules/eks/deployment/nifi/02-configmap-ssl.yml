@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nifi-ssl-cm
+data:
+  security.sh: |
+    #!/bin/bash
+
+    set -ex
+
+    # Configuration variables
+    NIFI_HOME="/opt/nifi/nifi-current"
+    NIFI_PROPERTIES="${NIFI_HOME}/conf/nifi.properties"
+    KEYTOOL_DIR="${NIFI_HOME}/keytool"
+    KEYSTORE_PATH="keytool/keystore.p12"
+    TRUSTSTORE_PATH="keytool/truststore.p12"
+    KEYSTORE_TYPE="pkcs12"
+    TRUSTSTORE_TYPE="pkcs12"
+    KEYSTORE_PASS="6n471adCyCHGLi4g"
+    TRUSTSTORE_PASS="6n471adCyCHGLi4g"
+    CERT_ALIAS="nifi-keystore"
+    TRUST_ALIAS="nifi-truststore"
+    CA_CERT="/opt/nifi/nifi-current/keytool/ca.crt"
+    CA_KEY="/opt/nifi/nifi-current/keytool/ca.key"
+    ORGANISATION_UNIT="${ORGANISATION_UNIT:-Vofox Square}"
+    ORGANISATION="${ORGANISATION:-Vofox}"
+    PUBLIC_DNS="${NIFI_WEB_PROXY_HOST:-localhost}" # Default to localhost if not set Might need to be updated based on your setup
+    CITY="${CITY:-Kochi}"
+    STATE="${STATE:-Kerala}"
+    COUNTRY_CODE="${COUNTRY_CODE:-IN}"
+    
+ 
+    cp /opt/nifi/nifi-current/ca/ca.crt /opt/nifi/nifi-current/keytool/ca.crt
+    cp /opt/nifi/nifi-current/ca/ca.key /opt/nifi/nifi-current/keytool/ca.key
+    chown nifi:nifi "/opt/nifi/nifi-current/keytool/ca.crt" "/opt/nifi/nifi-current/keytool/ca.key"
+
+    # 1. Create keytool directory if it doesn't exist
+    echo "Creating keytool directory..."
+    mkdir -p "${KEYTOOL_DIR}"
+
+    # 2. Generate a private key and certificate signing request (CSR)
+    echo "Generating private key and CSR..."
+    openssl req -new -newkey rsa:2048 -nodes \
+      -keyout "keytool/nifi-key.pem" \
+      -out "keytool/nifi.csr" \
+      -subj "/CN=${POD_NAME},OU=${ORGANISATION_UNIT},O=${ORGANISATION},L=${CITY},C=${COUNTRY_CODE}" \
+      -addext "subjectAltName=IP:${POD_IP},DNS:localhost,DNS:${NIFI_LOAD_BALANCER},IP:127.0.0.1,DNS:${NIFI_WEB_HTTPS_HOST},DNS:${POD_NAME},DNS:${NODE_IDENTITY},DNS:${PUBLIC_DNS}"
+
+    # 3. Sign the CSR with the CA certificate and key
+    echo "Signing CSR with CA..."
+    openssl x509 -req -in "keytool/nifi.csr" \
+      -CA "/opt/nifi/nifi-current/keytool/ca.crt" \
+      -CAkey "/opt/nifi/nifi-current/keytool/ca.key" \
+      -CAcreateserial \
+      -out "keytool/nifi-cert.pem" \
+      -days 3650 \
+      -sha384 \
+      -extfile <(printf "subjectAltName=IP:${POD_IP},DNS:localhost,DNS:${NIFI_LOAD_BALANCER},IP:127.0.0.1,DNS:${NIFI_WEB_HTTPS_HOST},DNS:${POD_NAME},DNS:${NODE_IDENTITY},DNS:${PUBLIC_DNS}")
+
+    # 4. Convert the private key and signed certificate to PKCS12 keystore
+    echo "Creating PKCS12 keystore..."
+    openssl pkcs12 -export \
+      -in "keytool/nifi-cert.pem" \
+      -inkey "keytool/nifi-key.pem" \
+      -out "keytool/keystore.p12" \
+      -name "${CERT_ALIAS}" \
+      -passout pass:"${KEYSTORE_PASS}"
+
+    # 5. Import the CA certificate into the truststore
+    echo "Generating truststore with CA certificate..."
+    keytool -import -noprompt -alias "${TRUST_ALIAS}" \
+      -file "/opt/nifi/nifi-current/keytool/ca.crt" \
+      -keystore "${TRUSTSTORE_PATH}" \
+      -storetype "${TRUSTSTORE_TYPE}" \
+      -storepass "${TRUSTSTORE_PASS}" \
+      -trustcacerts
+
+    # 6. Backup nifi.properties
+    echo "Backing up nifi.properties..."
+    cp "${NIFI_PROPERTIES}" "${NIFI_PROPERTIES}.bak" || { echo "Backup failed"; exit 1; }
+
+    # 7. Verify keystore and truststore
+    echo "Verifying keystore and truststore..."
+    keytool -list -keystore "${KEYSTORE_PATH}" -storetype PKCS12 -storepass "${KEYSTORE_PASS}" >/dev/null 2>&1 || { echo "Keystore verification failed"; exit 1; }
+    keytool -list -keystore "${TRUSTSTORE_PATH}" -storetype PKCS12 -storepass "${TRUSTSTORE_PASS}" >/dev/null 2>&1 || { echo "Truststore verification failed"; exit 1; }
+
+    # 8. Update nifi.security properties in nifi.properties
+    echo "Updating nifi.security properties..."
+    sed -i "s|nifi.security.keystore=.*|nifi.security.keystore=${KEYSTORE_PATH}|" "${NIFI_PROPERTIES}"
+    sed -i "s|nifi.security.keystorePasswd=.*|nifi.security.keystorePasswd=${KEYSTORE_PASS}|" "${NIFI_PROPERTIES}"
+    sed -i "s|nifi.security.truststore=.*|nifi.security.truststore=${TRUSTSTORE_PATH}|" "${NIFI_PROPERTIES}"
+    sed -i "s|nifi.security.truststorePasswd=.*|nifi.security.truststorePasswd=${TRUSTSTORE_PASS}|" "${NIFI_PROPERTIES}"
+    sed -i "s|nifi.sensitive.props.key=.*|nifi.sensitive.props.key=${KEYSTORE_PASS}|" "${NIFI_PROPERTIES}"
+    sed -i "s|nifi.sensitive.props.key.protected=.*|nifi.sensitive.props.key.protected=|" "${NIFI_PROPERTIES}"
+
+    # 9. Attempt to update sensitive properties key
+    echo "Attempting to update sensitive properties key..."
+    "${NIFI_HOME}/bin/nifi.sh" set-sensitive-properties-key "${KEYSTORE_PASS}" || {
+        echo "Warning: Failed to update sensitive properties key. Old key may be incorrect."
+        echo "Manually updated nifi.sensitive.props.key in nifi.properties."
+        echo "If NiFi fails to start, check for encrypted properties and reconfigure via NiFi UI."
+        echo "Try setting nifi.sensitive.props.key= temporarily and re-enter sensitive properties."
+    }
+
+    # 10. Archive old keystore/truststore in conf/
+    echo "Archiving old keystore/truststore..."
+    mv "${NIFI_HOME}/conf/keystore.p12" "${NIFI_HOME}/conf/keystore.p12.bak" 2>/dev/null
+    mv "${NIFI_HOME}/conf/truststore.p12" "${NIFI_HOME}/conf/truststore.p12.bak" 2>/dev/null
+
+    # 11. Start NiFi
+    echo "Starting NiFi..."
+    "${NIFI_HOME}/bin/nifi.sh" start || { echo "NiFi start failed"; exit 1; }
+
+    echo "Configuration complete. Check logs for errors: ${NIFI_HOME}/logs/nifi-app.log"
+    echo "If NiFi fails to start, check for sensitive properties decryption errors and reconfigure."

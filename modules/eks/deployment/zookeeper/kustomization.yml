@@ -1,0 +1,14 @@
+﻿---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+commonAnnotations:
+  app.kubernetes.io/managed-by: kustomization
+
+resources:
+- app.yml
+
+images:
+- name: zookeeper
+  newName: docker.io/zookeeper # This is from the original deployment/zookeeper/kustomization.yml
+  newTag: "3.9" # This is from the original deployment/zookeeper/kustomization.yml

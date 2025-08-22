@@ -1,0 +1,7 @@
+body {
+  font-family: 'Inter', sans-serif;
+}
+
+input[type='password']::-ms-reveal {
+  display: none;
+}

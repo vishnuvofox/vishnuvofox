@@ -1,0 +1,191 @@
+---
+   apiVersion: apps/v1
+   kind: StatefulSet
+   metadata:
+     name: nifi
+     labels:
+       name: nifi
+       app: nifi
+     annotations:
+       app.kubernetes.io/name: nifi
+       app.kubernetes.io/part-of: nifi
+   spec:
+     revisionHistoryLimit: 1
+     serviceName: nifi
+     podManagementPolicy: OrderedReady
+     selector:
+       matchLabels:
+         app: nifi
+     template:
+       metadata:
+         labels:
+           app: nifi
+       spec:
+         automountServiceAccountToken: false
+         enableServiceLinks: false
+         setHostnameAsFQDN: true
+         dnsPolicy: ClusterFirstWithHostNet
+         restartPolicy: Always
+         securityContext:
+           runAsGroup: 1000
+           runAsUser: 1000
+           runAsNonRoot: true
+           seccompProfile:
+             type: RuntimeDefault
+         initContainers:
+           - name: wait-for-zookeeper
+             image: docker.io/busybox:1.37
+             command:
+             - sh
+             - -c
+             - |
+               echo "Connecting to Zookeeper ${NIFI_ZK_CONNECT_STRING}"
+               until nc -vzw 1 zookeeper 2181 ; do
+                 echo "Waiting for zookeeper to start"
+                 sleep 3
+               done
+             envFrom:
+             - configMapRef:
+                 name: nifi-cm
+                 optional: false
+             resources:
+               requests:
+                 cpu: 20m
+                 memory: 10Mi
+               limits:
+                 cpu: 20m
+                 memory: 10Mi
+             securityContext:
+               allowPrivilegeEscalation: false
+               privileged: false
+               readOnlyRootFilesystem: true
+               capabilities:
+                 drop:
+                   - ALL
+         containers:
+         - name: nifi
+           image: 541448617660.dkr.ecr.us-east-1.amazonaws.com/nifi-custom:2.4.0
+           imagePullPolicy: IfNotPresent
+           command:
+             - /bin/sh
+             - -c
+             - |
+               echo "Starting NiFi"
+               /scripts/security.sh
+               /opt/nifi/scripts/start.sh
+           ports:
+           - containerPort: 11443
+             name: cluster
+           - containerPort: 8443
+             name: https
+           - containerPort: 6342
+             name: cluster-lb
+           - containerPort: 10000
+             name: nifi-rpc
+           env:
+             - name: POD_IP
+               valueFrom:
+                 fieldRef:
+                   fieldPath: status.podIP
+             - name: POD_NAME
+               valueFrom:
+                 fieldRef:
+                   fieldPath: metadata.name
+             - name: POD_NAMESPACE
+               valueFrom:
+                 fieldRef:
+                   fieldPath: metadata.namespace
+             - name: NIFI_LOAD_BALANCER
+               value: "nifi.$(POD_NAMESPACE).svc.cluster.local"
+             - name: NIFI_HOME
+               value: "/opt/nifi/nifi-current"
+             - name: NIFI_UI_BANNER_TEXT
+               value: $(POD_NAME)
+             - name: NIFI_WEB_HTTPS_HOST
+               value: $(POD_NAME).nifi.$(POD_NAMESPACE).svc.cluster.local
+             - name: NIFI_CLUSTER_NODE_ADDRESS
+               value: $(POD_NAME).nifi.$(POD_NAMESPACE).svc.cluster.local
+             - name: NIFI_REMOTE_INPUT_SOCKET_HOST
+               value: $(POD_NAME).nifi.$(POD_NAMESPACE).svc.cluster.local
+             - name: NIFI_REMOTE_INPUT_HOST
+               value: $(POD_NAME).nifi.$(POD_NAMESPACE).svc.cluster.local
+             - name: NIFI_REMOTE_INPUT_SECURE
+               value: "true"
+             - name: NIFI_CLUSTER_LOAD_BALANCE_HOST
+               value: $(POD_IP)
+             - name: NIFI_CLUSTER_LOAD_BALANCE_PORT
+               value: "6342"
+             - name: HOSTNAME
+               value: $(POD_IP)
+             - name: NODE_IDENTITY
+               value: $(POD_NAME)
+             - name: NIFI_CLUSTER_NODE_PROTOCOL_ADDRESS
+               value: $(POD_IP)
+             - name: KEYSTORE_PATH
+               value: "$(NIFI_HOME)/keytool/keystore.p12"
+             - name: TRUSTSTORE_PATH
+               value: "$(NIFI_HOME)/keytool/truststore.p12"
+           envFrom:
+             - configMapRef:
+                 name: nifi-cm
+                 optional: false
+           volumeMounts:
+             - name: data
+               mountPath: /opt/nifi/nifi-current/data
+               subPath: data
+               readOnly: false
+             - name: data
+               mountPath: /opt/nifi/nifi-current/keytool
+               subPath: keytool
+               readOnly: false
+             - name: scripts
+               mountPath: /scripts/security.sh
+               subPath: security.sh
+               readOnly: false
+             - name: ca-secret
+               mountPath: /opt/nifi/nifi-current/ca
+               readOnly: false
+           livenessProbe:
+             exec:
+               command:
+                 - pgrep
+                 - java
+             initialDelaySeconds: 120
+             periodSeconds: 30
+             timeoutSeconds: 20
+             failureThreshold: 3
+             successThreshold: 1
+           readinessProbe:
+             tcpSocket:
+               port: cluster
+             initialDelaySeconds: 200
+             periodSeconds: 30
+             timeoutSeconds: 20
+             failureThreshold: 3
+             successThreshold: 1
+           resources:
+             requests:
+               cpu: 400m
+               memory: 2Gi
+             limits:
+               cpu: 1
+               memory: 2Gi
+           securityContext:
+             allowPrivilegeEscalation: false
+             privileged: false
+             capabilities:
+               drop:
+                 - ALL
+         volumes:
+           - name: data
+             emptyDir:
+               sizeLimit: 3Gi
+           - name: scripts
+             configMap:
+               name: nifi-ssl-cm
+               optional: false
+               defaultMode: 0755
+           - name: ca-secret
+             secret:
+               secretName: nifi-ca-secret
+               defaultMode: 0755

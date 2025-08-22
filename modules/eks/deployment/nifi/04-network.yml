@@ -1,0 +1,31 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nifi
+  labels:
+    app: nifi
+  annotations:
+    app.kubernetes.io/name: nifi
+    app.kubernetes.io/part-of: nifi
+spec:
+  clusterIP: None # Make the service headless
+  selector:
+    app: nifi
+  ports:
+  - protocol: TCP
+    port: 6342
+    targetPort: 6342
+    name: cluster-lb
+  - protocol: TCP
+    port: 8443
+    targetPort: 8443
+    name: https
+  - protocol: TCP
+    port: 11443
+    targetPort: 11443
+    name: cluster
+  - protocol: TCP
+    port: 10000
+    targetPort: 10000
+    name: nifi-rpc

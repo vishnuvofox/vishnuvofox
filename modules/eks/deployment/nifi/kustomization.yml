@@ -1,0 +1,25 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+commonAnnotations:
+  app.kubernetes.io/managed-by: kustomization
+
+resources:
+- 00-rbac.yml
+- 01-configmap.yml
+- 02-configmap-ssl.yml
+- 03-statefulset.yml
+- 04-network.yml
+- 05-autoscale.yml
+#- 06-publish.yml
+
+
+
+images:
+- name: nifi
+  newName: docker.io/apache/nifi
+  newTag: "2.4.0"
+- name: wait
+  newName: docker.io/busybox
+  newTag: "1.37"
